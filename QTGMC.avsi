@@ -1,6 +1,5 @@
 #-------------------------------------------------------------------#
 #                                                                   #
-
 #                    QTGMC 3.33, by Vit, 2012                       #
 #                                                                   #
 #   A high quality deinterlacer using motion-compensated temporal   #
@@ -8,24 +7,39 @@
 #          Originally based on TempGaussMC_beta2 by Didée           #
 #                                                                   #
 #-------------------------------------------------------------------#
-
+#
 # Full documentation is in the 'QTGMC' html file that comes with this script
-
+#
 # --- LATEST CHANGES ---
+#
+# v3.33s (mod)
+# - fix bob chroma
+# - work with new masktool2 for avs 2.60
+#
+# v3.33d (mod)
+# - Added 32 bit precision option through the lsbd (for dfttest) and lsb (mdegrain) options.
+# - optimized some mask handling a bit as originally suggested by Vit
+# - others
 #
 # v3.33
 # - Increased maximum value for Rep0, Rep1 and Rep2 to 7 (from 5). Higher values help with flicker on static detail, potential for minor motion blur
 # - Bug fix for the fact that Bob always outputs a BFF clip regardless of field order of input (thanks ajp_anton)
 # - Improved generation of noise (NoiseDeint="Generate") for noise bypass / EZKeepGrain
 # - Minor change to denoising
-
+#
+# v3.32
+# - Bugfix with shutter blur and ChromaMotion (thanks Heaud)
+# - Tweaked vector recalculation for shutter motion blur
+# - Changed defaults for TR2 when using source-match
+# - Minor bugfix with SLMode/SLRad on pass-through settings
+#
 # --- REQUIREMENTS ---
 #
 # Input colorspaces: YV12, YUY2
 #
 # Core plugins:
-#	MVTools2 (2.5.11.2 or above)
-#	MaskTools v2 (recommend 2.0a45 or above. Must use the 2.5 version with YUY2)
+#	MVTools2 (2.5.11.3 or above)
+#	MaskTools v2 (recommend 2.0a48 or above. Must use the 2.5 version with YUY2)
 #	NNEDI3 (recommend 0.9.4 or above for speed)
 #	RemoveGrain + Repair (several versions of this plugin, use the SSE2 dlls from the file called "RemoveGrain-1.0.rar". Don't use the SSE3 versions )
 #   SSE2Tools for YUY2 support (from the earlier 0.9 version of RemoveGrain, use only SSE2Tools.dll from this version. Don't use the SSE3 version)
@@ -72,7 +86,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
                     float "NoiseRestore", string "NoiseDeint", bool "StabilizeNoise", int "InputType", float "ProgSADMask", int "FPSDivisor", \
                     int "ShutterBlur", float "ShutterAngleSrc", float "ShutterAngleOut", int "SBlurLimit", bool "Border", bool "Precise", string "Tuning", \
                     bool "ShowSettings", string "GlobalNames", string "PrevGlobals", int "ForceTR", \
-                    val "BT", val "DetailRestore", val "MotionBlur", val "MBlurLimit", val "NoiseBypass" )
+                    val "BT", val "DetailRestore", val "MotionBlur", val "MBlurLimit", val "NoiseBypass", bool "lsbd", bool "lsb" )
 {
 	# The preset "Ultra Fast" & EdiMode="RepYadif"/"Yadif" require the Yadif plugin, which doesn't autoload. Typically the calling script would load it.
 	# To have this script load Yadif put it's full path in string below (e.g. "C:\Plugins\Yadif.dll"). Use empty string ("") if calling script will load Yadif
@@ -87,7 +101,8 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 
 	#---------------------------------------
 	# Presets
-
+lsbd=default(lsbd, false)
+lsb=default(lsb, false)
 	# Select presets / tuning
 	Preset = default( Preset, "Slower" )
 	pNum = (Preset == "Placebo"   ) ? 0 : \
@@ -153,7 +168,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 
 	#                                                               Very                                                        Very      Super      Ultra
 	# Preset groups:                                     Placebo    Slow      Slower    Slow      Medium    Fast      Faster    Fast      Fast       Fast       Draft
-	TR0          = default( TR0,          Select( pNum,  2,         2,        2,        2,        2,        2,        1,        1,        1,         1,         0      ) )
+	TR0          = default( TR0,          Select( pNum,  2,         2,        2,        2,        2,        2,        1,        1,        1,         1,         1      ) )
 	TR1          = default( TR1,          Select( pNum,  2,         2,        2,        1,        1,        1,        1,        1,        1,         1,         1      ) )
 	TR2X         = default( TR2,          Select( pNum,  3,         2,        1,        1,        1,        0,        0,        0,        0,         0,         0      ) )
 	Rep0         = default( Rep0,         Select( pNum,  4,         4,        4,        4,        3,        3,        0,        0,        0,         0,         0      ) )
@@ -393,11 +408,15 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	              (!yuy2)                    ? repair0.RemoveGrain( 12,CMrg, planar=true ).GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=2 ) : \
 	                                           repair0.RemoveGrain( 12,CMrg, planar=true ).Planar2Interleaved().GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=2 ).Interleaved2Planar()
 	spatialBlur = (IsClip(spatialBlur) && SrchClipPP > 1) ? (ChromaMotion ? spatialBlur.Merge( repair0, 0.1 ) : spatialBlur.MergeLuma( repair0, 0.1 )) : spatialBlur
-	tweaked     = (!IsClip(srchClip) && SrchClipPP > 1) ? mt_lutxy( repair0, bobbed, "x 3 + y < x 3 + x 3 - y > x 3 - y ? ?", U=CMmt,V=CMmt ) : NOP()
+	tweluin26 = isyuy2(repair0) ? mt_lutxy( repair0.planar2interleaved.ConvertToYV16, bobbed.planar2interleaved.ConvertToYV16, "x 3 + y < x 3 + x 3 - y > x 3 - y ? ?", U=CMmt,V=CMmt ).ConvertToYuy2.interleaved2planar : \
+	mt_lutxy( repair0, bobbed, "x 3 + y < x 3 + x 3 - y > x 3 - y ? ?", U=CMmt,V=CMmt )
+	tweaked     = (!IsClip(srchClip) && SrchClipPP > 1) ? tweluin26 : NOP()
 	srchClip    = IsClip(srchClip)  ? srchClip : \
 	              (SrchClipPP == 0) ? repair0 : \
 	              (SrchClipPP < 3)  ? spatialBlur : \
-	                                  spatialBlur.mt_lutxy( tweaked, "x 7 + y < x 2 + x 7 - y > x 2 - x 51 * y 49 * + 100 / ? ?", U=CMmt,V=CMmt )
+	                                  isclip(spatialBlur) && isyuy2(spatialBlur) ? spatialBlur.planar2interleaved.ConvertToYV16.mt_lutxy( isclip(tweaked) ? tweaked.planar2interleaved.ConvertToYV16 : tweaked, \
+	"x 7 + y < x 2 + x 7 - y > x 2 - x 51 * y 49 * + 100 / ? ?", U=CMmt,V=CMmt ).ConvertToYuy2.interleaved2planar : \
+	spatialBlur.mt_lutxy( tweaked, "x 7 + y < x 2 + x 7 - y > x 2 - x 51 * y 49 * + 100 / ? ?", U=CMmt,V=CMmt )
 	# Calculate forward and backward motion vectors from motion search clip
 	srchSuper = IsClip(srchSuper) ? srchSuper : \
 	            (maxTR > 0)       ? srchClip.MSuper( pel=SubPel, sharp=SubPelInterp, hpad=hpad, vpad=vpad, chroma=ChromaMotion, planar=true ) : NOP()
@@ -425,7 +444,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	        (maxTR > 2)   ? srchSuper.MAnalyse( isb=false, delta=3, blksize=BlockSize, overlap=Overlap, search=Search, searchparam=SearchParam, \
 	                                            pelsearch=PelSearch, truemotion=TrueMotion, lambda=Lambda, lsad=LSAD, pnew=PNew, plevel=PLevel, \
 	                                            global=GlobalMotion, DCT=DCT, chroma=ChromaMotion ) : NOP()
-												
+
 	# Expose search clip, motion search super clip and motion vectors to calling script through globals
 	QTGMC_SetUserGlobal( GlobalNames, "srchClip",  srchClip,  ReplaceGlobals )
 	QTGMC_SetUserGlobal( GlobalNames, "srchSuper", srchSuper, ReplaceGlobals )
@@ -463,8 +482,9 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	                                                fullClip.MCompensate( fullSuper, bVec2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) )
 	noiseWindow = (yuy2 && NoiseTR > 0) ? noiseWindow.Planar2Interleaved() : noiseWindow
 	dnWindow = (NoiseProcess == 0)      ? NOP() : \
-	           (Denoiser == "dfttest")  ? noiseWindow.dfttest( Y=true, U=ChromaNoise, V=ChromaNoise, sigma=Sigma*4, tbsize=noiseTD, threads=DftThreads ) : \
+	           (Denoiser == "dfttest")  ? noiseWindow.dfttest( Y=true, U=ChromaNoise, V=ChromaNoise, sigma=Sigma*4, tbsize=noiseTD, threads=DftThreads, lsb=lsbd ) : \
 	                                      noiseWindow.FFT3DFilter( plane=(ChromaNoise ? 4 : 0), sigma=Sigma, bt=noiseTD )
+	dnwindow = (Denoiser == "dfttest") && lsbd ? dnWindow.ditherpost(mode=6, U=ChromaNoise?3:2, V=ChromaNoise?3:2) : dnWindow
 
 	# Rework denoised clip to match source format - various code paths here: discard the motion compensation window, discard doubled lines (from point resize)
 	# Also reweave to get interlaced noise if source was interlaced (could keep the full frame of noise, but it will be poor quality from the point resize)
@@ -481,7 +501,8 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 
 	# Get actual noise from difference. Then 'deinterlace' where we have weaved noise - create the missing lines of noise in various ways
 	planarDenoised = (NoiseProcess == 0) ? NOP() : yuy2 ? denoised.Interleaved2Planar() : denoised
-	noise = (totalRestore > 0.0)  ? mt_makediff( planarClip, planarDenoised, U=CNmt1,V=CNmt1 ) : NOP()
+	noise = (totalRestore > 0.0)  ? Isyuy2(planarClip) ? mt_makediff( planarClip.planar2interleaved.ConvertToYV16, isclip(planarDenoised) ? planarDenoised.planar2interleaved.ConvertToYV16 : planarDenoised, U=CNmt1,V=CNmt1 ).ConvertToYuy2.interleaved2planar : \
+	mt_makediff( planarClip, planarDenoised, U=CNmt1,V=CNmt1 ) : NOP()
 	deintNoise = (NoiseProcess == 0 || totalRestore == 0.0) ? NOP() : \
 	             (InputType != 0)                           ? noise : \
 	             (NoiseDeint == "Bob")                      ? noise.QTGMC_Bob( 0,0.5 ) : \
@@ -490,7 +511,9 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	# Motion-compensated stabilization of generated noise
 	noiseSuper = (StabilizeNoise) ? deintNoise.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, chroma=ChromaNoise, planar=true ) : NOP()
 	mcNoise    = (StabilizeNoise) ? deintNoise.MCompensate( noiseSuper, bVec1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	finalNoise = (StabilizeNoise) ? mt_lutxy( deintNoise, mcNoise, "x 128 - abs y 128 - abs > x y ? 0.6 * x y + 0.2 * +", U=CNmt1,V=CNmt1 ) : deintNoise
+	finalNoise = (StabilizeNoise) ? isclip(deintNoise) && isyuy2(deintNoise) ? mt_lutxy( deintNoise.planar2interleaved.ConvertToYV16, mcNoise.planar2interleaved.ConvertToYV16, \
+	"x 128 - abs y 128 - abs > x y ? 0.6 * x y + 0.2 * +", U=CNmt1,V=CNmt1 ).ConvertToYuy2.interleaved2planar : isclip(mcNoise) && isyuy2(mcNoise) ? mt_lutxy( deintNoise, mcNoise.planar2interleaved.ConvertToYV16, "x 128 - abs y 128 - abs > x y ? 0.6 * x y + 0.2 * +", U=CNmt1,V=CNmt1 ).ConvertToYuy2.interleaved2planar : \
+	mt_lutxy( deintNoise, mcNoise, "x 128 - abs y 128 - abs > x y ? 0.6 * x y + 0.2 * +", U=CNmt1,V=CNmt1 ) : deintNoise
 
 	# If NoiseProcess=1 denoise input clip. If NoiseProcess=2 leave noise in the clip and let the temporal blurs "denoise" it for a stronger effect
 	innerClip = (NoiseProcess == 1) ? denoised : clip
@@ -516,18 +539,22 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	edi = (InputType != 2 && InputType != 3) ? (!yuy2 ? edi1 : edi1.Interleaved2Planar()) :\
 	      (ProgSADMask <= 0.0)               ? (!yuy2 ? edi1.MergeChroma( innerClip ) : edi1.MergeChroma( innerClip ).Interleaved2Planar()) : \
 	                                           (!yuy2 ? mt_merge( innerClip, edi1, inputTypeBlend, U=2,V=2 ) : \
-											            mt_merge( innerClip.Interleaved2Planar(), edi1.Interleaved2Planar(), inputTypeBlend, U=2,V=2 ))
+											            mt_merge( innerClip.ConvertToYV16, edi1.ConvertToYV16, inputTypeBlend, U=2,V=2 ).ConvertToYuy2.interleaved2planar)
 
 	# Get the max/min value for each pixel over neighboring motion-compensated frames - used for temporal sharpness limiting
 	ediSuper = (TR1 > 0 || temporalSL)   ? edi.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, planar=true ) : NOP()
 	bComp1   = (temporalSL)              ? edi.MCompensate( ediSuper, bVec1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
 	fComp1   = (temporalSL)              ? edi.MCompensate( ediSuper, fVec1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	tMax     = (temporalSL)              ? edi.mt_logic( fComp1, "max", U=3,V=3 ).mt_logic( bComp1, "max", U=3,V=3 )    : NOP()
-	tMin     = (temporalSL)              ? edi.mt_logic( fComp1, "min", U=3,V=3 ).mt_logic( bComp1, "min", U=3,V=3 )    : NOP()
+	tMax     = (temporalSL)              ? isyuy2(edi) ? edi.planar2interleaved.ConvertToYV16.mt_logic( isclip(fComp1) ? fComp1.planar2interleaved.ConvertToYV16 : fComp1, "max", \
+	U=3,V=3 ).mt_logic( isclip(bComp1) ? bComp1.planar2interleaved.ConvertToYV16 : bComp1, "max", U=3,V=3 ).ConvertToYuy2.interleaved2planar : edi.mt_logic( fComp1, "max", U=3,V=3 ).mt_logic( bComp1, "max", U=3,V=3 )    : NOP()
+	tMin     = (temporalSL)              ? isyuy2(edi) ? edi.planar2interleaved.ConvertToYV16.mt_logic( isclip(fComp1) ? fComp1.planar2interleaved.ConvertToYV16 : fComp1, "min", \
+	U=3,V=3 ).mt_logic( isclip(bComp1) ? bComp1.planar2interleaved.ConvertToYV16 : bComp1, "min", U=3,V=3 ).ConvertToYuy2.interleaved2planar : edi.mt_logic( fComp1, "min", U=3,V=3 ).mt_logic( bComp1, "min", U=3,V=3 )    : NOP()
 	bComp3   = (SLRad > 1 && temporalSL) ? edi.MCompensate( ediSuper, bVec3, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
 	fComp3   = (SLRad > 1 && temporalSL) ? edi.MCompensate( ediSuper, fVec3, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	tMax     = (SLRad > 1 && temporalSL) ? tMax.mt_logic( fComp3, "max", U=3,V=3 ).mt_logic( bComp3, "max", U=3,V=3 )   : tMax
-	tMin     = (SLRad > 1 && temporalSL) ? tMin.mt_logic( fComp3, "min", U=3,V=3 ).mt_logic( bComp3, "min", U=3,V=3 )   : tMin
+	tMax     = (SLRad > 1 && temporalSL) ? isyuy2(tMax) ? tMax.planar2interleaved.ConvertToYV16.mt_logic( isclip(fComp3) ? fComp3.planar2interleaved.ConvertToYV16 : fComp3, "max", \
+	U=3,V=3 ).mt_logic( isclip(bComp3) ? bComp3.planar2interleaved.ConvertToYV16 : bComp3, "max", U=3,V=3 ).ConvertToYuy2.interleaved2planar : tMax.mt_logic( fComp3, "max", U=3,V=3 ).mt_logic( bComp3, "max", U=3,V=3 )   : tMax
+	tMin     = (SLRad > 1 && temporalSL) ? isyuy2(tMin) ? tMin.planar2interleaved.ConvertToYV16.mt_logic( isclip(fComp3) ? fComp3.planar2interleaved.ConvertToYV16 : fComp3, "min", \
+	U=3,V=3 ).mt_logic( isclip(bComp3) ? bComp3.planar2interleaved.ConvertToYV16 : bComp3, "min", U=3,V=3 ).ConvertToYuy2.interleaved2planar : tMin.mt_logic( fComp3, "min", U=3,V=3 ).mt_logic( bComp3, "min", U=3,V=3 )   : tMin
 
 
 	#---------------------------------------
@@ -536,9 +563,11 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	# Use motion vectors to blur interpolated image (edi) with motion-compensated previous and next frames. As above, this is done to remove shimmer from
 	# alternate frames so the same binomial kernels are used. However, by using motion-compensated smoothing this time we avoid motion blur. The use of
 	# MDegrain1 (motion compensated) rather than TemporalSmooth makes the weightings *look* different, but they evaluate to the same values
-	# Create linear weightings of neighbors first                                                                                     -2    -1     0    1     2
-	degrain1 = (TR1 > 0) ? edi.MDegrain1( ediSuper, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()  # 0.00  0.33  0.33  0.33  0.00
-	degrain2 = (TR1 > 1) ? edi.MDegrain1( ediSuper, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()  # 0.33  0.00  0.33  0.00  0.33
+	# Create linear weightings of neighbors first                                                                                             -2    -1     0    1     2
+	degrain1 = (TR1 > 0) ? edi.MDegrain1( ediSuper, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb) : NOP()  # 0.00  0.33  0.33  0.33  0.00
+	degrain2 = (TR1 > 1) ? edi.MDegrain1( ediSuper, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb) : NOP()  # 0.33  0.00  0.33  0.00  0.33
+	degrain1 = (TR1 > 0) && lsb ? degrain1.ditherpost(mode=6)  : degrain1
+	degrain2 = (TR1 > 1) && lsb ? degrain2.ditherpost(mode=6)  : degrain2
 
 	# Combine linear weightings to give binomial weightings - TR1=0: (1), TR1=1: (1:2:1), TR1=2: (1:4:6:4:1)
 	binomial1 = (TR1 == 0) ? edi : \
@@ -553,7 +582,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	                             repair1.QTGMC_ApplySourceMatch( InputType, ediInput, bVec1,fVec1, bVec2,fVec2, SubPel, SubPelInterp, hpad, vpad, \
 	                                                             ThSAD1, ThSCD1, ThSCD2, SourceMatch, MatchTR1, MatchEdi, MatchNNSize, MatchNNeurons, \
 	                                                             MatchEdiQual, MatchEdiMaxD, MatchTR2, MatchEdi2, MatchNNSize2, MatchNNeurons2, MatchEdiQual2, \
-	                                                             MatchEdiMaxD2, MatchEnhance, EdiThreads )
+	                                                             MatchEdiMaxD2, MatchEnhance, EdiThreads, lsb )
 
 	# Lossless=2 - after preparing an interpolated, de-shimmered clip, restore the original source fields into it and clean up any artefacts.
 	# This mode will not give a true lossless result because the resharpening and final temporal smooth are still to come, but it will add further detail.
@@ -565,50 +594,59 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	# Resharpen / retouch output
 
 	# Resharpen to counteract temporal blurs. Little sharpening needed for source-match mode since it has already recovered sharpness from source
-	vresharp1 = (SMode == 2) ? Merge( lossed1.mt_expand( mode="vertical", U=3,V=3 ), lossed1.mt_inpand( mode="vertical", U=3,V=3 ) ) : NOP()
-	vresharp  = (Precise && SMode == 2) ? vresharp1.mt_lutxy( lossed1, "x y < x 1 + x y > x 1 - x ? ?", U=3,V=3 ) : vresharp1 # Precise mode: reduce tiny overshoot
+	vresharp1 = (SMode == 2) ? isyuy2(lossed1) ? Merge( lossed1.planar2interleaved.ConvertToYV16.mt_expand( mode="vertical", U=3,V=3 ), \
+	lossed1.planar2interleaved.ConvertToYV16.mt_inpand( mode="vertical", U=3,V=3 ) ).ConvertToYuy2.interleaved2planar : \
+	Merge( lossed1.mt_expand( mode="vertical", U=3,V=3 ), lossed1.mt_inpand( mode="vertical", U=3,V=3 ) ) : NOP()
+	vresharp  = (Precise && SMode == 2) ? isclip(vresharp1) && isyuy2(vresharp1) ? vresharp1.planar2interleaved.ConvertToYV16.mt_lutxy( lossed1.planar2interleaved.ConvertToYV16, \
+	"x y < x 1 + x y > x 1 - x ? ?", U=3,V=3 ).ConvertToYuy2.interleaved2planar : vresharp1.mt_lutxy( lossed1, "x y < x 1 + x y > x 1 - x ? ?", U=3,V=3 ) : vresharp1 # Precise mode: reduce tiny overshoot
 	resharp   = (SMode == 0) ? lossed1 : \
-	            (SMode == 1) ? lossed1.mt_lutxy( lossed1.RemoveGrain( rgBlur, planar=true ),  "x x y - "+ string(sharpAdj) + " * +", U=3,V=3 ) : \
-	                           lossed1.mt_lutxy( vresharp.RemoveGrain( rgBlur, planar=true ), "x x y - "+ string(sharpAdj) + " * +", U=3,V=3 )
+	            (SMode == 1) ? isyuy2(lossed1) ? lossed1.planar2interleaved.ConvertToYV16.mt_lutxy( lossed1.RemoveGrain( rgBlur, planar=true ).planar2interleaved.ConvertToYV16,  \
+	"x x y - "+ string(sharpAdj) + " * +", U=3,V=3 ).ConvertToYuy2.interleaved2planar : lossed1.mt_lutxy( lossed1.RemoveGrain( rgBlur, planar=true ),  "x x y - "+ string(sharpAdj) + " * +", U=3,V=3 ) : \
+	                           isyuy2(lossed1) ? lossed1.planar2interleaved.ConvertToYV16.mt_lutxy( vresharp.RemoveGrain( rgBlur, planar=true ).planar2interleaved.ConvertToYV16, \
+	"x x y - "+ string(sharpAdj) + " * +", U=3,V=3 ).ConvertToYuy2.interleaved2planar : lossed1.mt_lutxy( vresharp.RemoveGrain( rgBlur, planar=true ), "x x y - "+ string(sharpAdj) + " * +", U=3,V=3 )
 
 	# Slightly thin down 1-pixel high horizontal edges that have been widened into neigboring field lines by the interpolator
 	SVThinSc = SVThin * 6.0
-	vertMedD = (SVthin > 0.0) ? mt_lutxy( lossed1, lossed1.VerticalCleaner( mode=1, modeU=-1, modeV=-1, planar=true ), "y x - " + string(SVThinSc) + " * 128 +", U=1,V=1 ) : NOP()
+	vertMedD = (SVthin > 0.0) ? isyuy2(lossed1) ? mt_lutxy( lossed1.planar2interleaved.ConvertToYV16, lossed1.VerticalCleaner( mode=1, modeU=-1, modeV=-1, planar=true ).planar2interleaved.ConvertToYV16, \
+	"y x - " + string(SVThinSc) + " * 128 +", U=1,V=1 ).ConvertToYuy2.interleaved2planar : mt_lutxy( lossed1, lossed1.VerticalCleaner( mode=1, modeU=-1, modeV=-1, planar=true ), "y x - " + string(SVThinSc) + " * 128 +", U=1,V=1 ) : NOP()
 	vertMedD = (SVthin > 0.0) ? (!yuy2 ? vertMedD.Blur( 1,0 ) : vertMedD.Planar2Interleaved().Blur( 1,0 ).Interleaved2Planar()) : NOP()
-	neighborD = (SVthin > 0.0) ? mt_lutxy( vertMedD, vertMedD.RemoveGrain( rgBlur,-1, planar=true ), "y 128 - abs x 128 - abs > y 128 ?" ) : NOP()
-	thin      = (SVthin > 0.0) ? resharp.mt_adddiff( neighborD, U=2,V=2 ) : resharp
+	neighborD = (SVthin > 0.0) ? isclip(vertMedD) && isyuy2(vertMedD) ? mt_lutxy( vertMedD.planar2interleaved.ConvertToYV16, vertMedD.RemoveGrain( rgBlur,-1, planar=true ).planar2interleaved.ConvertToYV16, \
+	"y 128 - abs x 128 - abs > y 128 ?" ).ConvertToYuy2.interleaved2planar : mt_lutxy( vertMedD, vertMedD.RemoveGrain( rgBlur,-1, planar=true ), "y 128 - abs x 128 - abs > y 128 ?" ) : NOP()
+	thin      = (SVthin > 0.0) ? isclip(resharp) && isyuy2(resharp) ? resharp.planar2interleaved.ConvertToYV16.mt_adddiff( isclip(neighborD) ? neighborD.planar2interleaved.ConvertToYV16 : neighborD, U=2,V=2 ).ConvertToYuy2.interleaved2planar : resharp.mt_adddiff( neighborD, U=2,V=2 ) : resharp
 
 	# Back blend the blurred difference between sharpened & unsharpened clip, before (1st) sharpness limiting (Sbb == 1,3). A small fidelity improvement
 	backBlend1 = (Sbb != 1 && Sbb != 3) ? thin : \
 		         !yuy2 ? thin.mt_makediff( mt_makediff( thin, lossed1, U=1,V=1 ).RemoveGrain( 12, -1, planar=true ) \
 	                         .GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ), U=2,V=2 ) : \
-		                 thin.mt_makediff( mt_makediff( thin, lossed1, U=1,V=1 ).RemoveGrain( 12, -1, planar=true ) \
-		                     .Planar2Interleaved().GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ).Interleaved2Planar(), U=2,V=2 )
+		                 thin.planar2interleaved.ConvertToYV16.mt_makediff( mt_makediff( thin.planar2interleaved.ConvertToYV16, lossed1.planar2interleaved.ConvertToYV16, U=1,V=1 ).ConvertToYuy2.interleaved2planar.RemoveGrain( 12, -1, planar=true ) \
+		                     .Planar2Interleaved().GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ).ConvertToYV16, U=2,V=2 ).ConvertToYuy2.Interleaved2Planar()
 
 	# Limit over-sharpening by clamping to neighboring (spatial or temporal) min/max values in original
 	# Occurs here (before final temporal smooth) if SLMode == 1,2. This location will restrict sharpness more, but any artefacts introduced will be smoothed
 	sharpLimit1 = (SLMode == 1) ? backBlend1.Repair( ((SLrad <= 1) ? edi : backBlend1.Repair( edi, 12, planar=true )), 1, planar=true ) : \
-	              (SLMode == 2) ? backBlend1.mt_clamp( tMax,tMin, Sovs,Sovs, U=3,V=3 ) : \
+	              (SLMode == 2) ? isyuy2(backBlend1) ? backBlend1.planar2interleaved.ConvertToYV16.mt_clamp( tMax.planar2interleaved.ConvertToYV16,tMin.planar2interleaved.ConvertToYV16, Sovs,Sovs, U=3,V=3 ).ConvertToYuy2.interleaved2planar : backBlend1.mt_clamp( tMax,tMin, Sovs,Sovs, U=3,V=3 ) : \
 	                              backBlend1
 
 	# Back blend the blurred difference between sharpened & unsharpened clip, after (1st) sharpness limiting (Sbb == 2,3). A small fidelity improvement
 	backBlend2 = (Sbb < 2) ? sharpLimit1 : \
 		         !yuy2     ? sharpLimit1.mt_makediff( mt_makediff( sharpLimit1, lossed1, U=1,V=1 ).RemoveGrain( 12, -1, planar=true ) \
 	                                    .GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ), U=2,V=2 ) : \
-		                     sharpLimit1.mt_makediff( mt_makediff( sharpLimit1, lossed1, U=1,V=1 ).RemoveGrain( 12, -1, planar=true ) \
-	                                    .Planar2Interleaved().GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ).Interleaved2Planar(), U=2,V=2 )
+		                     sharpLimit1.planar2interleaved.ConvertToYV16.mt_makediff( mt_makediff( sharpLimit1.planar2interleaved.ConvertToYV16, lossed1.planar2interleaved.ConvertToYV16, U=1,V=1 ).ConvertToYuy2.interleaved2planar.RemoveGrain( 12, -1, planar=true ) \
+	                                    .Planar2Interleaved().GaussResize( w,h, 0,0, w+epsilon,h+epsilon, p=5 ).ConvertToYV16, U=2,V=2 ).ConvertToYuy2.Interleaved2Planar()
 
 	# Add back any extracted noise, prior to final temporal smooth - this will restore detail that was removed as "noise" without restoring the noise itself
 	# Average luma of FFT3DFilter extracted noise is 128.5, so deal with that too
 	addNoise1 = (GrainRestore <= 0.0) ? backBlend2 : \
+		isyuy2(backBlend2) ? backBlend2.planar2interleaved.ConvertToYV16.mt_adddiff( finalNoise.planar2interleaved.ConvertToYV16.mt_lut( "x " + noiseCentre + " - " + string(GrainRestore) + " * 128 +", U=CNmt1,V=CNmt1 ), U=CNmt2,V=CNmt2 ).ConvertToYuy2.interleaved2planar : \
 		backBlend2.mt_adddiff( finalNoise.mt_lut( "x " + noiseCentre + " - " + string(GrainRestore) + " * 128 +", U=CNmt1,V=CNmt1 ), U=CNmt2,V=CNmt2 )
 
 	# Final light linear temporal smooth for denoising
 	stableSuper = (TR2 > 0) ? addNoise1.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, planar=true ) : NOP()
 	stable  = (TR2 == 0) ? addNoise1 : \
-	          (TR2 == 1) ? addNoise1.MDegrain1( stableSuper, bVec1,fVec1,                           thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : \
-	          (TR2 == 2) ? addNoise1.MDegrain2( stableSuper, bVec1,fVec1, bVec2,fVec2,              thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : \
- 	                       addNoise1.MDegrain3( stableSuper, bVec1,fVec1, bVec2,fVec2, bVec3,fVec3, thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true )
+	          (TR2 == 1) ? addNoise1.MDegrain1( stableSuper, bVec1,fVec1,                           thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : \
+	          (TR2 == 2) ? addNoise1.MDegrain2( stableSuper, bVec1,fVec1, bVec2,fVec2,              thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : \
+ 	                       addNoise1.MDegrain3( stableSuper, bVec1,fVec1, bVec2,fVec2, bVec3,fVec3, thSAD=ThSAD2, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb )
+	stable  = (TR2 > 0) && lsb ? stable.ditherpost(mode=6) : stable
 
 	# Remove areas of difference between final output & basic interpolated image that are not bob-shimmer fixes: repairs motion blur caused by temporal smooth
 	repair2 = (Rep2 == 0) ? stable : stable.QTGMC_KeepOnlyBobShimmerFixes( edi, Rep2, RepChroma )
@@ -616,7 +654,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	# Limit over-sharpening by clamping to neighboring (spatial or temporal) min/max values in original
 	# Occurs here (after final temporal smooth) if SLMode == 3,4. Allows more sharpening here, but more prone to introducing minor artefacts
 	sharpLimit2 = (SLMode == 3) ? repair2.Repair( ((SLrad <= 1) ? edi : repair2.Repair( edi, 12, planar=true )), 1, planar=true ) : \
-	              (SLMode == 4) ? repair2.mt_clamp( tMax,tMin, Sovs,Sovs, U=3,V=3 ) : \
+	              (SLMode == 4) ? isyuy2(repair2) ? repair2.planar2interleaved.ConvertToYV16.mt_clamp( tMax.planar2interleaved.ConvertToYV16,tMin.planar2interleaved.ConvertToYV16, Sovs,Sovs, U=3,V=3 ).ConvertToYuy2.interleaved2planar : repair2.mt_clamp( tMax,tMin, Sovs,Sovs, U=3,V=3 ) : \
 	                              repair2
 
 	# Lossless=1 - inject source fields into result and clean up inevitable artefacts. Provided NoiseRestore=0.0 or 1.0, this mode will make the script result 
@@ -626,6 +664,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	# Add back any extracted noise, after final temporal smooth. This will appear as noise/grain in the output
 	# Average luma of FFT3DFilter extracted noise is 128.5, so deal with that too
 	addNoise2 = (NoiseRestore <= 0.0) ? lossed2 : \
+		isyuy2(lossed2) ? lossed2.planar2interleaved.ConvertToYV16.mt_adddiff( finalNoise.planar2interleaved.ConvertToYV16.mt_lut( "x " + noiseCentre + " - " + string(NoiseRestore) + " * 128 +", U=CNmt1,V=CNmt1 ), U=CNmt2,V=CNmt2 ).ConvertToYuy2.interleaved2planar : \
 		lossed2.mt_adddiff( finalNoise.mt_lut( "x " + noiseCentre + " - " + string(NoiseRestore) + " * 128 +", U=CNmt1,V=CNmt1 ), U=CNmt2,V=CNmt2 )
 
 
@@ -658,6 +697,7 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 	sbMotionMask = (ShutterBlur > 0 && SBlurLimit > 0) ? MMask( srchClip, bVec1, kind=0, ml=SBlurLimit, planar=true ) : NOP()
 	sblurred     = (ShutterBlur == 0) ? addNoise2 : \
 	               (SBlurLimit == 0)  ? sblur : \
+	                                    isyuy2(addNoise2) ? mt_merge( addNoise2.planar2interleaved.ConvertToYV16, isclip(sblur) ? sblur.planar2interleaved.ConvertToYV16 : sblur, sbMotionMask.planar2interleaved.ConvertToYV16, U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
 	                                    mt_merge( addNoise2, sblur, sbMotionMask, U=3,V=3 )
 	# Reduce frame rate
 	decimated = (FPSDivisor != 1) ? sblurred.SelectEvery( FPSDivisor, 0 ) : sblurred
@@ -668,7 +708,8 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 
 	# Show output of choice + settings
 	# >>>> Restore YUY2 to interleaved
-	output = (ShowNoise == 0.0) ? cropped : finalNoise.mt_lut( "x 128 - " + string(ShowNoise) + " * 128 +", U=CNmt128,V=CNmt128 )
+	output = (ShowNoise == 0.0) ? cropped : isyuy2(finalNoise) ? finalNoise.planar2interleaved.ConvertToYV16.mt_lut( "x 128 - " + string(ShowNoise) + " * 128 +", U=CNmt128,V=CNmt128 ).ConvertToYuy2.interleaved2planar : \
+	finalNoise.mt_lut( "x 128 - " + string(ShowNoise) + " * 128 +", U=CNmt128,V=CNmt128 )
 	output = yuy2 ? output.Planar2Interleaved() : output
 	return (ShowSettings == false) ? output : \
 		output.Subtitle( "TR0=" + string(TR0) + " | TR1=" + string(TR1) + " | TR2=" + string(TR2) + " | Rep0=" + string(Rep0) + " | Rep1=" + string(Rep1) + \
@@ -698,10 +739,18 @@ function QTGMC( clip Input, string "Preset", int "TR0", int "TR1", int "TR2", in
 # Helpers
 
 # Same as Bob, but keeps the field order the same.
-function QTGMC_Bob( clip, float "b", float "c", float "height" )
+function QTGMC_Bob(clip clip, float "b", float "c", float "height" )
 {
+  h = Default(Height, Height(clip))
+  w = clip.Width
+
+  oiFields=clip.AssumeTFF().SeparateFields()
+  Ec = oiFields.SelectEven().BicubicResize(w, h, b, c,  src_top=0.5).AssumeFrameBased()
+  Oc = oiFields.SelectOdd( ).BicubicResize(w, h, b, c, src_top=-0.5).AssumeFrameBased()
+  crchroma=GetParity(clip) ? Interleave(Ec, Oc).AssumeTFF() : Interleave(Oc, Ec).AssumeBFF()
 	(clip.GetParity()) ? clip.Bob( b,c, height ).AssumeTFF() : \
 	                     clip.Bob( b,c, height ).AssumeBFF()
+        IsYV12(clip) ? MergeChroma(crchroma) : last
 }
 
 
@@ -737,33 +786,6 @@ function QTGMC_Interpolate( clip Input, int InputType, string EdiMode, int NNSiz
 	return (!IsClip(interpuv)) ? interp : interp.MergeChroma( interpuv )
 }
 
-
-# Functions (from original TGMC) used instead of mt_xxflate with similar operation but a somewhat stronger result. Originally added for speed, they are
-# no longer faster due to improvements in masktools. Difference (visual and speed) is small so may be reverted in a later version.
-function QTGMC_inflate( clip c, int "Y", int "U", int "V" )
-{
-	# >>>> YUY2 is planar here
-	mtY =default( Y, 3 )
-	mtU =default( U, 1 )
-	mtV =default( V, 1 )
-	rgY = (mtY == 3) ? 20 : -1
-	rgU = (mtU == 3) ? 20 : -1
-	rgV = (mtV == 3) ? 20 : -1
-	mt_logic( c, c.RemoveGrain( rgY, rgU, rgV, planar=true ), "max", Y=mtY,U=mtU,V=mtV )
-}
-
-function QTGMC_deflate( clip c, int "Y", int "U", int "V" )
-{
-	# >>>> YUY2 is planar here
-	mtY =default( Y, 3 )
-	mtU =default( U, 1 )
-	mtV =default( V, 1 )
-	rgY = (mtY == 3) ? 20 : -1
-	rgU = (mtU == 3) ? 20 : -1
-	rgV = (mtV == 3) ? 20 : -1
-	mt_logic( c, c.RemoveGrain( rgY, rgU, rgV, planar=true ), "min", Y=mtY,U=mtU,V=mtV )
-}
-
 # Helper function: Compare processed clip with reference clip: only allow thin, horizontal areas of difference, i.e. bob shimmer fixes
 # Rough algorithm: Get difference, deflate vertically by a couple of pixels or so, then inflate again. Thin regions will be removed
 #                  by this process. Restore remaining areas of difference back to as they were in reference clip.
@@ -771,7 +793,7 @@ function QTGMC_KeepOnlyBobShimmerFixes( clip Input, clip Ref, int Rep, bool Chro
 {
 	# >>>> YUY2 is planar here
 
-	# ed is the erosion distance - how much to deflate then reflate to remove thin areas of interest: 0 = minimum to 6 = maximum
+	# ed is the erosion distance - how much to deflate then reflate to remove thin areas of interest: 0 = minimum to 5 = maximum
 	# od is over-dilation level  - extra inflation to ensure areas to restore back are fully caught:  0 = none to 3 = one full pixel
 	# If Rep < 10, then ed = Rep and od = 0, otherwise ed = 10s digit and od = 1s digit (nasty method, but kept for compatibility with original TGMC)
 	Rep    = default( Rep,    1    )
@@ -781,43 +803,47 @@ function QTGMC_KeepOnlyBobShimmerFixes( clip Input, clip Ref, int Rep, bool Chro
 	RCrg  = Chroma ? 3 : 1
 	RCrgo = Chroma ? 3 : 2
 
-	diff = mt_makediff( Ref, Input, U=3,V=3 )
+	diff = mt_makediff(Isyuy2(Ref) ? Ref.planar2interleaved.ConvertToYV16 : Ref, Isyuy2(Input) ? Input.planar2interleaved.ConvertToYV16 : Input, U=3,V=3 )
 
 	# Areas of positive difference                                                                # ed = 0 1 2 3 4 5 6 7
 	choke1 =                        diff.  mt_inpand( mode="vertical", U=RCrg,V=RCrg )            #      x x x x x x x x    1 pixel   \
 	choke1 = (ed > 2)             ? choke1.mt_inpand( mode="vertical", U=RCrg,V=RCrg ) : choke1   #      . . . x x x x x    1 pixel    |  Deflate to remove thin areas
 	choke1 = (ed > 5)             ? choke1.mt_inpand( mode="vertical", U=RCrg,V=RCrg ) : choke1   #      . . . . . . x x    1 pixel   /
-	choke1 = (ed % 3 != 0)        ? choke1.QTGMC_deflate( U=RCrg,V=RCrg )              : choke1   #      . x x . x x . x    A bit more deflate & some horizonal effect
+	choke1 = (ed % 3 != 0)        ? choke1.mt_deflate( U=RCrg,V=RCrg )                 : choke1   #      . x x . x x . x    A bit more deflate & some horizonal effect
+	choke1 = Isyv16(choke1) ? choke1.ConvertToYuy2.interleaved2planar : choke1
 	choke1 = (ed == 2 || ed == 5) ? choke1.RemoveGrain( 4, planar=true )               : choke1   #      . . x . . x . .    Local median
                                                                                                                       
+	choke1 = Isyuy2(choke1) ? choke1.planar2interleaved.ConvertToYV16 : choke1
 	choke1 =                        choke1.mt_expand( mode="vertical", U=RCrg,V=RCrg )            #      x x x x x x x x    1 pixel  \
 	choke1 = (ed > 1)             ? choke1.mt_expand( mode="vertical", U=RCrg,V=RCrg ) : choke1   #      . . x x x x x x    1 pixel   | Reflate again
 	choke1 = (ed > 4)             ? choke1.mt_expand( mode="vertical", U=RCrg,V=RCrg ) : choke1   #      . . . . . x x x    1 pixel  /
 
 	# Over-dilation - extra reflation up to about 1 pixel
 	choke1 = (od == 0)            ? choke1 : \
-	         (od == 1)            ? choke1.QTGMC_inflate( U=RCrg,V=RCrg ) : \
-	         (od == 2)            ? choke1.QTGMC_inflate( U=RCrg,V=RCrg ).QTGMC_inflate( U=RCrg,V=RCrg ) : \
-	                                choke1.mt_expand( U=RCrg,V=RCrg )
+	         (od == 1)            ? choke1.mt_inflate( U=RCrg,V=RCrg ) : \
+	         (od == 2)            ? choke1.mt_inflate( U=RCrg,V=RCrg ).mt_inflate( U=RCrg,V=RCrg ) : \
+	                                choke1.mt_expand ( U=RCrg,V=RCrg )
 
 	# Areas of negative difference (similar to above)
 	choke2 =                        diff.  mt_expand( mode="vertical", U=RCrg,V=RCrg )         
 	choke2 = (ed > 2)             ? choke2.mt_expand( mode="vertical", U=RCrg,V=RCrg ) : choke2
 	choke2 = (ed > 5)             ? choke2.mt_expand( mode="vertical", U=RCrg,V=RCrg ) : choke2
-	choke2 = (ed % 3 != 0)        ? choke2.QTGMC_inflate( U=RCrg,V=RCrg )              : choke2
+	choke2 = (ed % 3 != 0)        ? choke2.mt_inflate( U=RCrg,V=RCrg )                 : choke2
+	choke2 = Isyv16(choke2) ? choke2.ConvertToYuy2.interleaved2planar : choke2
 	choke2 = (ed == 2 || ed == 5) ? choke2.RemoveGrain( 4, planar=true )               : choke2
+	choke2 = Isyuy2(choke2) ? choke2.planar2interleaved.ConvertToYV16 : choke2
 	choke2 =                        choke2.mt_inpand( mode="vertical", U=RCrg,V=RCrg )
 	choke2 = (ed > 1)             ? choke2.mt_inpand( mode="vertical", U=RCrg,V=RCrg ) : choke2
 	choke2 = (ed > 4)             ? choke2.mt_inpand( mode="vertical", U=RCrg,V=RCrg ) : choke2
 	choke2 = (od == 0)            ? choke2 : \
-	         (od == 1)            ? choke2.QTGMC_deflate( U=RCrg,V=RCrg ) : \
-	         (od == 2)            ? choke2.QTGMC_deflate( U=RCrg,V=RCrg ).QTGMC_deflate( U=RCrg,V=RCrg ) : \
-	                                choke2.mt_inpand( U=RCrg,V=RCrg )
+	         (od == 1)            ? choke2.mt_deflate( U=RCrg,V=RCrg )  : \
+	         (od == 2)            ? choke2.mt_deflate( U=RCrg,V=RCrg ).mt_deflate( U=RCrg,V=RCrg ) : \
+	                                choke2.mt_inpand ( U=RCrg,V=RCrg )
 
 	# Combine above areas to find those areas of difference to restore
 	restore = diff.mt_lutxy( choke1, "x 129 < x y 128 < 128 y ? ?", U=RCrg,V=RCrg ).mt_lutxy( choke2, "x 127 > x y 128 > 128 y ? ?", U=RCrg,V=RCrg )
-
-	return Input.mt_adddiff( restore, U=RCrgo,V=RCrgo )
+	fin4ret = Isyuy2(Input) ? Input.planar2interleaved.ConvertToYV16.mt_adddiff( restore, U=RCrgo,V=RCrgo ) : Input.mt_adddiff( restore, U=RCrgo,V=RCrgo )
+	return Isyuy2(Ref) ? fin4ret.ConvertToYuy2.interleaved2planar : fin4ret
 }
 
 
@@ -830,13 +856,14 @@ function QTGMC_Generate2ndFieldNoise( clip Input, clip InterleavedClip, bool "Ch
 	ChromaNoise = default( ChromaNoise, false )
 	CNmt1 = ChromaNoise ? 3 : 1
 	origNoise = Input.SeparateFields()
+	origNoise = Isyuy2(origNoise) ? origNoise.planar2interleaved.ConvertToYV16 : origNoise
 	noiseMax  = origNoise.mt_expand( mode="square", U=CNmt1,V=CNmt1 ).mt_expand( mode="horizontal", U=CNmt1,V=CNmt1 )
 	noiseMin  = origNoise.mt_inpand( mode="square", U=CNmt1,V=CNmt1 ).mt_inpand( mode="horizontal", U=CNmt1,V=CNmt1 )
 	random    = BlankClip( InterleavedClip.SeparateFields(), color_yuv=$808080 ).AddGrainC( var=1800, uvar=ChromaNoise ? 1800 : 0 )
-	random    = InterleavedClip.IsYUY2() ? random.Interleaved2Planar() : random
+	random    = InterleavedClip.IsYUY2() ? random.ConvertToYV16 : random
 	varRandom = mt_makediff( noiseMax, noiseMin, U=CNmt1,V=CNmt1 ).mt_lutxy( random, "x 128 - y * 256 / 128 +", U=CNmt1,V=CNmt1)
 	newNoise  = noiseMin.mt_adddiff( varRandom, U=CNmt1,V=CNmt1 )
-	return Interleave( origNoise, newNoise ).Weave()
+	return Isyuy2(origNoise) ? Interleave( origNoise, newNoise ).Weave().ConvertToYuy2.interleaved2planar : Interleave( origNoise, newNoise ).Weave()
 }
 
 
@@ -856,13 +883,21 @@ function QTGMC_MakeLossless( clip Input, clip Source, int InputType )
 
 	# Clean some of the artefacts caused by the above - creating a second version of the "new" fields
 	vertMedian  = processed.VerticalCleaner( mode=1, planar=true )
-	vertMedDiff = mt_makediff( processed, vertMedian, U=3,V=3 )
+	vertMedDiff = mt_makediff( Isyuy2(processed) ? processed.planar2interleaved.ConvertToYV16 : \
+	processed, Isyuy2(vertMedian) ? vertMedian.planar2interleaved.ConvertToYV16 : vertMedian, U=3,V=3 )
 	vmNewDiff1  = vertMedDiff.SeparateFields().SelectEvery( 4, 1,2 )
-	vmNewDiff2  = vmNewDiff1.VerticalCleaner( mode=1, planar=true ).mt_lutxy( vmNewDiff1, "x 128 - y 128 - * 0 < 128 x 128 - abs y 128 - abs < x y ? ?", U=3,V=3 )
+	vmNewDiff1  = Isyv16(vmNewDiff1) ? vmNewDiff1.ConvertToYuy2.interleaved2planar : vmNewDiff1
+	vmNewDiff2  = vmNewDiff1.VerticalCleaner( mode=1, planar=true )
+	vmNewDiff2  = Isyuy2(vmNewDiff2) ? vmNewDiff2.planar2interleaved.ConvertToYV16.mt_lutxy( vmNewDiff1.planar2interleaved.ConvertToYV16, \
+	"x 128 - y 128 - * 0 < 128 x 128 - abs y 128 - abs < x y ? ?", U=3,V=3 ) : \
+	vmNewDiff2.mt_lutxy( vmNewDiff1, "x 128 - y 128 - * 0 < 128 x 128 - abs y 128 - abs < x y ? ?", U=3,V=3 )
+	vmNewDiff2  = Isyv16(vmNewDiff2) ? vmNewDiff2.ConvertToYuy2.interleaved2planar : vmNewDiff2
 	vmNewDiff3  = vmNewDiff2.Repair( vmNewDiff2.RemoveGrain( 2, planar=true ), 1, planar=true )
 
 	# Reweave final result
-	return Interleave( srcFields, newFields.mt_makediff( vmNewDiff3, U=3,V=3 )).SelectEvery( 4, 0,1,3,2 ).Weave()
+	newfd = Isyuy2(newFields) ? newFields.planar2interleaved.ConvertToYV16.mt_makediff( vmNewDiff3.planar2interleaved.ConvertToYV16, U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
+	newFields.mt_makediff( vmNewDiff3, U=3,V=3 )
+	return Interleave( srcFields, newfd).SelectEvery( 4, 0,1,3,2 ).Weave()
 }
 
 
@@ -872,7 +907,7 @@ function QTGMC_ApplySourceMatch( clip Deinterlace, int InputType, val Source, va
                                  int SubPel, int SubPelInterp, int hpad, int vpad, int ThSAD1, int ThSCD1, int ThSCD2, int SourceMatch, \
                                  int MatchTR1, string MatchEdi, int MatchNNSize, int MatchNNeurons, int MatchEdiQual, int MatchEdiMaxD,\
                                  int MatchTR2, string MatchEdi2, int MatchNNSize2, int MatchNNeurons2, int MatchEdiQual2, int MatchEdiMaxD2, \
-                                 float MatchEnhance, int EdiThreads )
+                                 float MatchEnhance, int EdiThreads, bool lsb )
 {
 	# >>>> YUY2: 'Deinterlace' is planar, 'Source' is interleaved (changed to planar here for all processing except interpolation) - returns planar result
 	yuy2 = Source.IsYUY2()
@@ -897,30 +932,39 @@ function QTGMC_ApplySourceMatch( clip Deinterlace, int InputType, val Source, va
 	                                     .QTGMC_Interpolate( InputType, MatchEdi, MatchNNSize, MatchNNeurons, MatchEdiQual, MatchEdiMaxD, EdiThreads ) \
 	                                     .Interleaved2Planar()
 	match1Super    = (SourceMatch > 0 && MatchTR1 > 0) ? match1Edi.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, planar=true ) : NOP()
-	match1Degrain1 = (SourceMatch > 0 && MatchTR1 > 0) ? match1Edi.MDegrain1( match1Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	match1Degrain2 = (SourceMatch > 0 && MatchTR1 > 1) ? match1Edi.MDegrain1( match1Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
+	match1Degrain1 = (SourceMatch > 0 && MatchTR1 > 0) ? match1Edi.MDegrain1( match1Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match1Degrain2 = (SourceMatch > 0 && MatchTR1 > 1) ? match1Edi.MDegrain1( match1Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match1Degrain1 = (SourceMatch > 0 && MatchTR1 > 0) && lsb ? match1Degrain1.ditherpost(mode=6) : match1Degrain1
+	match1Degrain2 = (SourceMatch > 0 && MatchTR1 > 1) && lsb ? match1Degrain2.ditherpost(mode=6) : match1Degrain2
 	match1         = (SourceMatch < 1) ? Deinterlace : \
 	                 (MatchTR1 == 0)   ? match1Edi : \
 	                 (MatchTR1 == 1)   ? match1Degrain1.Merge( match1Edi, 0.25 ) : \
 	                                     match1Degrain1.Merge( match1Degrain2, 0.2 ).Merge( match1Edi, 0.0625 )
 
 	# Enhance effect of source-match stages 2 & 3 by sharpening clip prior to refinement (source-match tends to underestimate so this will leave result sharper)
-	match1Shp = (SourceMatch > 1 && MatchEnhance > 0.0) ? match1.mt_lutxy( match1.RemoveGrain( 12, planar=true ), "x x y - "+ string(MatchEnhance) + " * +", U=3,V=3 ) : match1
+	malu = Isyuy2(match1) ? match1.planar2interleaved.ConvertToYV16.mt_lutxy( match1.RemoveGrain( 12, planar=true ).planar2interleaved.ConvertToYV16, \
+	"x x y - "+ string(MatchEnhance) + " * +", U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
+	match1.mt_lutxy( match1.RemoveGrain( 12, planar=true ), "x x y - "+ string(MatchEnhance) + " * +", U=3,V=3 )
+	match1Shp = (SourceMatch > 1 && MatchEnhance > 0.0) ? malu : match1
 
 	# Source-match refinement. Find difference between source clip & equivalent fields in (updated) interpolated/smoothed clip. Interpolate & binomially smooth
 	# this difference then add it back to output. Helps restore differences that the basic match missed. However, as this pass works on a difference rather than
 	# the source image it can be prone to occasional artefacts (difference images are not ideal for interpolation). In fact a lower quality interpolation such
 	# as a simple bob often performs nearly as well as advanced, slower methods (e.g. NNEDI3)
 	match2Clip     = (SourceMatch < 2 || InputType == 1) ? match1Shp : match1Shp.SeparateFields().SelectEvery( 4, 0,3 ).Weave()
-	match2Diff     = (SourceMatch > 1) ? mt_makediff( Source, match2Clip, U=3,V=3 ) : NOP()
+	matchdifyuyin26= Isyuy2(Source) ? mt_makediff( Source.planar2interleaved.ConvertToYV16, match2Clip.planar2interleaved.ConvertToYV16, U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
+	mt_makediff( Source, match2Clip, U=3,V=3 )
+	match2Diff     = (SourceMatch > 1) ? matchdifyuyin26 : NOP()
 	match2Edi      = (SourceMatch <= 1) ? NOP() : \
 	                 !yuy2 ? match2Diff.QTGMC_Interpolate( InputType, MatchEdi2, MatchNNSize2, MatchNNeurons2, MatchEdiQual2, MatchEdiMaxD2, EdiThreads ) : \
 	                         match2Diff.Planar2Interleaved() \
 	                                   .QTGMC_Interpolate( InputType, MatchEdi2, MatchNNSize2, MatchNNeurons2, MatchEdiQual2, MatchEdiMaxD2, EdiThreads ) \
 	                                   .Interleaved2Planar()
 	match2Super    = (SourceMatch > 1 && MatchTR2 > 0) ? match2Edi.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, planar=true ) : NOP()
-	match2Degrain1 = (SourceMatch > 1 && MatchTR2 > 0) ? match2Edi.MDegrain1( match2Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	match2Degrain2 = (SourceMatch > 1 && MatchTR2 > 1) ? match2Edi.MDegrain1( match2Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
+	match2Degrain1 = (SourceMatch > 1 && MatchTR2 > 0) ? match2Edi.MDegrain1( match2Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match2Degrain2 = (SourceMatch > 1 && MatchTR2 > 1) ? match2Edi.MDegrain1( match2Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match2Degrain1 = (SourceMatch > 1 && MatchTR2 > 0) && lsb ? match2Degrain1.ditherpost(mode=6) : match2Degrain1
+	match2Degrain2 = (SourceMatch > 1 && MatchTR2 > 1) && lsb ? match2Degrain2.ditherpost(mode=6) : match2Degrain2
 	match2         = (SourceMatch < 2) ? match1 : \
 	                 (MatchTR2 == 0)   ? match2Edi : \
 	                 (MatchTR2 == 1)   ? match2Degrain1.Merge( match2Edi, 0.25 ) : \
@@ -928,18 +972,24 @@ function QTGMC_ApplySourceMatch( clip Deinterlace, int InputType, val Source, va
 
 	# Source-match second refinement - correct error introduced in the refined difference by temporal smoothing. Similar to error correction from basic step
 	errorAdjust2   = Select( MatchTR2, 1.0, 2.0 / (1.0 + errorTemporalSimilarity), 8.0 / (3.0 + 5.0 * errorTemporalSimilarity) )
+	matlutin26 = Isyuy2(match2Edi) ? mt_lutxy( match2Edi.planar2interleaved.ConvertToYV16, match2.planar2interleaved.ConvertToYV16, \
+	"x " + string(errorAdjust2 + 1) + " * y " + string(errorAdjust2) + " * -", U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
+	mt_lutxy( match2Edi, match2, "x " + string(errorAdjust2 + 1) + " * y " + string(errorAdjust2) + " * -", U=3,V=3 )
 	match3Update   = (SourceMatch < 3 || MatchTR2 == 0) \
-	                     ? match2Edi : mt_lutxy( match2Edi, match2, "x " + string(errorAdjust2 + 1) + " * y " + string(errorAdjust2) + " * -", U=3,V=3 )
+	                     ? match2Edi : matlutin26
 	match3Super    = (SourceMatch > 2 && MatchTR2 > 0) ? match3Update.MSuper( pel=SubPel, sharp=SubPelInterp, levels=1, hpad=hpad, vpad=vpad, planar=true ) : NOP()
-	match3Degrain1 = (SourceMatch > 2 && MatchTR2 > 0) ? match3Update.MDegrain1( match3Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
-	match3Degrain2 = (SourceMatch > 2 && MatchTR2 > 1) ? match3Update.MDegrain1( match3Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true ) : NOP()
+	match3Degrain1 = (SourceMatch > 2 && MatchTR2 > 0) ? match3Update.MDegrain1( match3Super, bVec1,fVec1, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match3Degrain2 = (SourceMatch > 2 && MatchTR2 > 1) ? match3Update.MDegrain1( match3Super, bVec2,fVec2, thSAD=ThSAD1, thSCD1=ThSCD1,thSCD2=ThSCD2, planar=true, lsb=lsb ) : NOP()
+	match3Degrain1 = (SourceMatch > 2 && MatchTR2 > 0) && lsb ? match3Degrain1.ditherpost(mode=6) : match3Degrain1
+	match3Degrain2 = (SourceMatch > 2 && MatchTR2 > 1) && lsb ? match3Degrain2.ditherpost(mode=6) : match3Degrain2
 	match3         = (SourceMatch < 3) ? match2 : \
 	                 (MatchTR2 == 0)   ? match3Update : \
 	                 (MatchTR2 == 1)   ? match3Degrain1.Merge( match3Update, 0.25 ) : \
 	                                     match3Degrain1.Merge( match3Degrain2, 0.2 ).Merge( match3Update, 0.0625 )
 
 	# Apply difference calculated in source-match refinement
-	return (SourceMatch < 2) ? match1 : match1Shp.mt_adddiff( match3, U=3,V=3 )
+	return (SourceMatch < 2) ? match1 : Isyuy2(match1Shp) ? match1Shp.planar2interleaved.ConvertToYV16.mt_adddiff( match3.planar2interleaved.ConvertToYV16, U=3,V=3 ).ConvertToYuy2.interleaved2planar : \
+	match1Shp.mt_adddiff( match3, U=3,V=3 )
 }
 
 
