@@ -1,6 +1,6 @@
-# FFmpegSource 2.21 helper functions
+# FFmpegSource 2.22 helper functions
 # Created by TheFluff
-
+LoadCPlugin("ffms2.dll")
 function FFmpegSource2(string source, int "vtrack", int "atrack", bool "cache", \
 	string "cachefile", int "fpsnum", int "fpsden", int "threads", \
 	string "timecodes", int "seekmode", bool "overwrite", int "width", int "height", \
@@ -93,11 +93,11 @@ function FFColorRange(int i) {
     return Select(i,"Unknown/Unspecified","Limited range","Full range")
 }
 
-function FFCropping(int l,int t, int r,int b) {
+function FFCropping(int l, int t, int r, int b) {
     return "Left="+String(l)+" Top="+String(t)+" Right="+String(r)+" Bottom="+String(b) 
 }
 
-function FFSampAR(int num,int den) {
+function FFSampAR(int num, int den) {
     return num > 0 ? String(num)+":"+String(den)+((num<=0 || den<=0)?"":string(Float(num)/den," (%.3f)")) : "Unknown/Unspecified"
 }
 
